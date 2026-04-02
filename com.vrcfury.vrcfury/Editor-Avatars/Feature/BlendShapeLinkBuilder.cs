@@ -298,5 +298,30 @@ namespace VF.Feature {
                 }
             }
         }
+
+        public static string GetTitlePropertyPath() => "linkSkins";
+
+        public static string GetDynamicTitle(SerializedProperty prop) {
+            var baseObj = prop.FindPropertyRelative("baseObj")?.stringValue;
+            var linkSkins = prop.FindPropertyRelative("linkSkins");
+
+            if (string.IsNullOrEmpty(baseObj)) return null;
+
+            var skinNames = new List<string>();
+            for (int i = 0; i < linkSkins.arraySize && i < 2; i++) {
+                var renderer = linkSkins.GetArrayElementAtIndex(i)
+                    .FindPropertyRelative("renderer")
+                    ?.objectReferenceValue as SkinnedMeshRenderer;
+                if (renderer != null) {
+                    skinNames.Add(renderer.name);
+                }
+            }
+
+            var linkedStr = skinNames.Count > 0
+                ? string.Join(", ", skinNames) + (linkSkins.arraySize > 2 ? ", ..." : "")
+                : "No skins";
+
+            return $"BlendShape Link ({baseObj} > {linkedStr})";
+        }
     }
 }

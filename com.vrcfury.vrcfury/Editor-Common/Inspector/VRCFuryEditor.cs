@@ -1,5 +1,8 @@
+using System;
 using System.Linq;
+using System.Reflection;
 using UnityEditor;
+using UnityEditor.UIElements;
 using UnityEngine;
 using UnityEngine.UIElements;
 using VF.Builder;
@@ -22,7 +25,39 @@ namespace VF.Inspector {
                 return FeatureFinder.RenderFeatureEditor(property, (title, bodyContent, builderType) => {
                     var wrapper = new VisualElement();
 
-                    wrapper.Add(VRCFuryComponentHeader.CreateHeaderOverlay(title));
+                    Action<Label> onLabelReady = null;
+                    if (builderType != null) {
+                        var getTitlePropertyPath = builderType.GetMethod(
+                            "GetTitlePropertyPath",
+                            BindingFlags.Static | BindingFlags.Public,
+                            null, Type.EmptyTypes, null
+                        );
+                        var getDynamicTitle = builderType.GetMethod(
+                            "GetDynamicTitle",
+                            BindingFlags.Static | BindingFlags.Public,
+                            null, new[] { typeof(SerializedProperty) }, null
+                        );
+                        if (getTitlePropertyPath != null && getDynamicTitle != null) {
+                            var propPath = getTitlePropertyPath.Invoke(null, null) as string;
+                            var titleProp = !string.IsNullOrEmpty(propPath)
+                                ? property.FindPropertyRelative(propPath)
+                                : null;
+                            if (titleProp != null) {
+                                var capturedTitle = title;
+                                onLabelReady = lbl => {
+                                    if (lbl == null) return;
+                                    var trackField = VRCFuryEditorUtils.OnChange(titleProp, () => {
+                                        lbl.text = getDynamicTitle.Invoke(null, new object[] { property }) as string
+                                                   ?? capturedTitle;
+                                    });
+                                    wrapper.Add(trackField);
+                                    wrapper.Bind(property.serializedObject);
+                                };
+                            }
+                        }
+                    }
+
+                    wrapper.Add(VRCFuryComponentHeader.CreateHeaderOverlay(title, onLabelReady));
 
                     var body = new VisualElement().AddTo(wrapper);
                     body.Add(bodyContent);

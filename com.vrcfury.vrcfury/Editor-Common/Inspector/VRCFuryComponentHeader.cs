@@ -1,4 +1,5 @@
-﻿using System.Linq;
+﻿using System;
+using System.Linq;
 using UnityEditor;
 using UnityEditor.UIElements;
 using UnityEngine;
@@ -91,6 +92,7 @@ namespace VF.Inspector {
             row.Add(triangleRight);
 
             var name = new Label(title) {
+                name = "vrcfTitleLabel",
                 style = {
                     //color = Color.white,
                     unityTextAlign = TextAnchor.MiddleLeft,
@@ -117,7 +119,9 @@ namespace VF.Inspector {
             var inspectorRoot = FindEditor(body);
 
             if (HasMultipleHeaders(body) || inspectorRoot == null) {
-                body.Add(RenderHeader(title, false));
+                var header = RenderHeader(title, false);
+                body.Add(header);
+                body.userData = header as Label;
                 return;
             }
 
@@ -129,24 +133,28 @@ namespace VF.Inspector {
                 .First();
 
             if (headerIndex < 0) {
-                body.Add(RenderHeader(title, false));
+                var header = RenderHeader(title, false);
+                body.Add(header);
+                body.userData = header as Label;
                 return;
             }
 
             var headerArea = RenderHeader(title, true);
             headerArea.AddToClassList("vrcfHeaderOverlay");
             inspectorRoot.Insert(headerIndex+1, headerArea);
+            body.userData = headerArea.Q<Label>("vrcfTitleLabel");
             
             body.RegisterCallback<DetachFromPanelEvent>(e => {
                 headerArea.parent?.Remove(headerArea);
             });
         }
 
-        public static VisualElement CreateHeaderOverlay(string title) {
+        public static VisualElement CreateHeaderOverlay(string title, Action<Label> onLabelReady = null) {
             var el = new VisualElement();
             el.AddToClassList("vrcfHeader");
             el.RegisterCallback<AttachToPanelEvent>(e => {
                 AttachHeaderOverlay(el, title);
+                onLabelReady?.Invoke(el.userData as Label);
             });
 
             return el;
