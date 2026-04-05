@@ -218,5 +218,18 @@ namespace VF.Feature {
             
             return wrapper;
         }
+
+        public static string GetTitlePropertyPath() => "sign";
+
+        public static string GetDynamicTitle(SerializedProperty prop) {
+            var hand = (GestureDriver.Hand)(prop.FindPropertyRelative("hand")?.enumValueIndex ?? 0);
+            var sign = (GestureDriver.HandSign)(prop.FindPropertyRelative("sign")?.enumValueIndex ?? 0);
+            var comboSign = (GestureDriver.HandSign)(prop.FindPropertyRelative("comboSign")?.enumValueIndex ?? 0);
+
+            if (hand == GestureDriver.Hand.COMBO) {
+                return $"Gestures ({hand}: L-{sign} R-{comboSign})";
+            }
+            return $"Gestures ({hand} {sign})";
+        }
     }
 }

@@ -694,6 +694,13 @@ namespace VF.Feature {
             output.Add(tabbed);
             return output;
         }
+
+        public static string GetTitlePropertyPath() => "name";
+
+        public static string GetDynamicTitle(SerializedProperty prop) {
+            var name = prop.FindPropertyRelative("name")?.stringValue;
+            return string.IsNullOrEmpty(name) ? null : $"Toggle ({name})";
+        }
     }
 
 }

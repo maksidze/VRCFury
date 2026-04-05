@@ -347,5 +347,12 @@ namespace VF.Feature {
                 model.skinRewriteScalingFactor = 1;
             }
         }
+
+        public static string GetTitlePropertyPath() => "propBone";
+        public static string GetDynamicTitle(SerializedProperty prop) {
+            var bone = prop.FindPropertyRelative("propBone")?.objectReferenceValue as GameObject;
+            return bone != null ? $"Armature Link ({bone.name})" : null;
+        }
+
     }
 }

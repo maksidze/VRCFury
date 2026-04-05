@@ -94,6 +94,20 @@ namespace VF.Feature.Base {
                     title = titleAttribute.Title;
                 }
 
+                var getDynamicTitleMethod = builderType.GetMethod(
+                    "GetDynamicTitle",
+                    BindingFlags.Static | BindingFlags.Public,
+                    null,
+                    new[] { typeof(SerializedProperty) },
+                    null
+                );
+                if (getDynamicTitleMethod != null) {
+                    var dynamicTitle = getDynamicTitleMethod.Invoke(null, new object[] { prop }) as string;
+                    if (!string.IsNullOrEmpty(dynamicTitle)) {
+                        title = dynamicTitle;
+                    }
+                }
+
                 var staticEditorMethod = builderType.GetMethods(BindingFlags.Static | BindingFlags.Public)
                     .Where(method => method.GetCustomAttribute<FeatureEditorAttribute>() != null)
                     .DefaultIfEmpty(null)

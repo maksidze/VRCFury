@@ -52,5 +52,15 @@ namespace VF.Feature {
             content.Add(VRCFuryEditorUtils.Prop(prop.FindPropertyRelative("bone"), "Bone to target"));
             return content;
         }
+
+        public static string GetTitlePropertyPath() => "bone";
+
+        public static string GetDynamicTitle(SerializedProperty prop) {
+            var bone = (HumanBodyBones)(prop.FindPropertyRelative("bone")?.enumValueIndex ?? 0);
+            if (bone == HumanBodyBones.LastBone) {
+                return "CS Retarget (Armature Root)";
+            }
+            return $"CS Retarget ({bone})";
+        }
     }
 }

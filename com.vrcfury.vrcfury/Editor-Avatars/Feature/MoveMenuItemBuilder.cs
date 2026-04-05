@@ -120,5 +120,14 @@ namespace VF.Feature {
             row.Add(new Button(OnClick) { text = selectLabel });
             return row;
         }
+
+        public static string GetTitlePropertyPath() => "fromPath";
+
+        public static string GetDynamicTitle(SerializedProperty prop) {
+            var from = prop.FindPropertyRelative("fromPath")?.stringValue;
+            var to = prop.FindPropertyRelative("toPath")?.stringValue;
+            if (string.IsNullOrEmpty(from)) return null;
+            return string.IsNullOrEmpty(to) ? $"Move/Rename ({from}" : $"Move/Rename ({from} > {to})";
+        }
     }
 }
