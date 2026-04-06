@@ -14,7 +14,7 @@ void sps_plus_search(
     
     float maxVal = 0;
     if (_SPS_Plus_Ring > maxVal) { maxVal = _SPS_Plus_Ring; type = SPS_TYPE_RING_TWOWAY; }
-    if (_SPS_Plus_Hole == maxVal) { type = SPS_TYPE_RING_ONEWAY; }
+    if (abs(_SPS_Plus_Hole - maxVal) < 0.001) { type = SPS_TYPE_RING_ONEWAY; }
     if (_SPS_Plus_Hole > maxVal) { maxVal = _SPS_Plus_Hole; type = SPS_TYPE_HOLE; }
 
     if (maxVal > 0) {

@@ -84,6 +84,8 @@ void sps_apply_real(
 		bezierLerp = sps_saturated_map(applyLerp, 0, 1);
 		shrinkLerp = sps_saturated_map(applyLerp, 0.8, 1) * shrinkLerp;
 	}
+	
+	if (dumbLerp == 0 && bezierLerp == 0) return;
 
 	rootPos *= (1-shrinkLerp);
 	orfDistance *= (1-shrinkLerp);
