@@ -190,6 +190,14 @@ namespace VF.Inspector {
                 })
             ));
 
+            // Touch Animations
+            container.Add(VRCFuryEditorUtils.CheckboxList(
+                serializedObject.FindProperty("touchActions"),
+                "Enable Touch Animations",
+                "Triggers an animation when this plug is touched by a hand or world vibrator pickup",
+                "Touch Animations"
+            ));
+
             container.Add(GetOgbHapticsSection(haptics => {
                 haptics.Add(SpsEditorUtils.AutoHapticIdProp(
                     serializedObject.FindProperty("name"),

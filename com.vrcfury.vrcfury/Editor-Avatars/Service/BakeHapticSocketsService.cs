@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using UnityEditor;
 using UnityEngine;
 using VF.Builder;
 using VF.Builder.Haptics;
@@ -16,6 +17,7 @@ using VF.Utils;
 using VF.Utils.Controller;
 using VRC.Dynamics;
 using VRC.SDK3.Avatars.Components;
+using static VF.Utils.BlendtreeMath;
 
 namespace VF.Service {
     [VFService]
@@ -34,6 +36,7 @@ namespace VF.Service {
         [VFAutowired] private readonly VRCAvatarDescriptor avatar;
         [VFAutowired] private readonly ControllersService controllers;
         [VFAutowired] private readonly FrameTimeService frameTimeService;
+        [VFAutowired] private readonly SmoothingService smoothingService;
         private ControllerManager fx => controllers.GetFx();
         [VFAutowired] private readonly MenuService menuService;
         private MenuManager menu => menuService.GetMenu();
@@ -41,6 +44,12 @@ namespace VF.Service {
         [FeatureBuilderAction]
         public void Apply() {
             var saved = spsOptions.GetOptions().saveSockets;
+
+            var fxRaw = fx.GetRaw();
+            var fxPath = fxRaw != null ? AssetDatabase.GetAssetPath(fxRaw) : "<null>";
+            if (string.IsNullOrEmpty(fxPath))
+                fxPath = $"<in-memory controller: name='{fxRaw?.name ?? "null"}', instanceID={fxRaw?.GetInstanceID()}>";
+            Debug.Log($"[VRCFury] Avatar: {avatarObject.GetPath()} | FX controller: {fxPath}");
 
             var enableAuto = avatarObject.GetComponentsInSelfAndChildren<VRCFuryHapticSocket>()
                 .Where(o => o.addMenuItem && o.enableAuto)
@@ -248,6 +257,185 @@ namespace VF.Service {
                             Contacts.Value
                         );
                     }
+
+                    if (socket.touchActions.Count > 0) {
+                        Debug.Log($"[VRCFury Socket {oscId}] Processing {socket.touchActions.Count} touch action(s)");
+                        for (var tai = 0; tai < socket.touchActions.Count; tai++) {
+                            var ta = socket.touchActions[tai];
+                            Debug.Log($"[VRCFury Socket {oscId}] TouchAction[{tai}]: useWorldPowerLevels={ta.useWorldPowerLevels}");
+                        }
+                        var touchActParent = GameObjects.Create("TouchActions", bakeResult.worldSpace);
+                        animObjects.Add(touchActParent);
+
+                        const float touchRadius = 0.1f;
+                        var baseReqTouch = new HapticContactsService.ReceiverRequest() {
+                            obj = touchActParent,
+                            radius = touchRadius,
+                            type = ContactReceiver.ReceiverType.Constant,
+                            localOnly = true,
+                            useHipAvoidance = socket.useHipAvoidance,
+                            usePrefix = false
+                        };
+
+                        var selfReqT = baseReqTouch.Clone();
+                        selfReqT.paramName = $"{oscId}/SockTouchSelf";
+                        selfReqT.objName = "SockTouchSelf";
+                        selfReqT.tags = HapticUtils.SelfContacts;
+                        selfReqT.party = HapticUtils.ReceiverParty.Self;
+                        var socketTouchSelf = hapticContacts.AddReceiver(selfReqT);
+
+                        var othersReqT = baseReqTouch.Clone();
+                        othersReqT.paramName = $"{oscId}/SockTouchOthers";
+                        othersReqT.objName = "SockTouchOthers";
+                        othersReqT.tags = HapticUtils.BodyContacts;
+                        othersReqT.party = HapticUtils.ReceiverParty.Others;
+                        var socketTouchOthers = hapticContacts.AddReceiver(othersReqT);
+
+                        var socketPowerParamCache = new Dictionary<string, VFAFloat>();
+
+                        // Single synced OSC parameter (0…1): 0=no contact, 0.25=L1, 0.50=L2, 0.75=L3, 1.0=L4 (or proportional touch).
+                        // usePrefix:false → clean OSC path /avatar/parameters/{oscId}/VibratePower
+                        var vibIntensityParam = fx.NewFloat("OGB/Orf/" + oscId.Replace('/','_') + "/VibratePower", synced: true, def: 0f, usePrefix: false);
+                        VFAFloat lastEffectiveWeight = null;
+                        // For useWorldPowerLevels: store wRecvs from last iteration to drive VibratePower via
+                        // VRCAvatarParameterDriver instead of AAP blend tree.
+                        // AAP-driven synced floats are NOT sent via VRChat OSC — only ParameterDriver values are.
+                        VFAFloat[] lastWRecvs = null;
+
+                        var socketTouchNum = 0;
+                        foreach (var touchAction in socket.touchActions) {
+                            socketTouchNum++;
+                            var prefix = $"{oscId}/SockTouch/{socketTouchNum}";
+
+                            var dbt = directTreeService.Create($"{oscId} - Socket Touch {socketTouchNum} - Smooth");
+                            var math = directTreeService.GetMath(dbt);
+
+                            VFAFloat effectiveWeight;
+
+                            if (touchAction.useWorldPowerLevels) {
+                                // 4 Constant receivers, ONE active at a time (exclusive senders).
+                                // Tags: VRCF_VibPow_L1..L4.  Level N activates only LN.
+                                // wPower = L1*0.25 + L2*0.50 + L3*0.75 + L4*1.00  →  0 / 0.25 / 0.50 / 0.75 / 1.00
+                                // Smoothed directly so level transitions are gradual.
+                                var wParent = GameObjects.Create($"SockWorldPow_{socketTouchNum}", bakeResult.worldSpace);
+                                animObjects.Add(wParent);
+                                var wBaseReq = new HapticContactsService.ReceiverRequest() {
+                                    obj             = wParent,
+                                    radius          = 0.1f,
+                                    type            = ContactReceiver.ReceiverType.Constant,
+                                    localOnly       = true,
+                                    useHipAvoidance = false,
+                                    usePrefix       = false,
+                                    party           = HapticUtils.ReceiverParty.Others
+                                };
+                                var wRecvs = new VFAFloat[4];
+                                for (var li = 0; li < 4; li++) {
+                                    var r = wBaseReq.Clone();
+                                    r.paramName = $"{prefix}/WP{li + 1}";
+                                    r.objName   = $"WP{li + 1}";
+                                    r.tags      = new[] { $"VRCF_VibPow_L{li + 1}" };
+                                    wRecvs[li]  = hapticContacts.AddReceiver(r);
+                                }
+                                var wPower = math.Add($"{prefix}/WorldPower",
+                                    ((VFAFloatOrConst)wRecvs[0], 0.25f),
+                                    ((VFAFloatOrConst)wRecvs[1], 0.50f),
+                                    ((VFAFloatOrConst)wRecvs[2], 0.75f),
+                                    ((VFAFloatOrConst)wRecvs[3], 1.00f));
+                                effectiveWeight = smoothingService.Smooth(dbt, $"{prefix}/WSmoothed", wPower,
+                                    touchAction.smoothingSeconds, useAcceleration: false);
+                                // Save receiver refs so the post-loop block can drive VibratePower via ParameterDriver
+                                lastWRecvs = wRecvs;
+                            } else {
+                                lastWRecvs = null;
+                                VFAFloat rawContact;
+                                if (touchAction.enableSelf) {
+                                    rawContact = math.Max(socketTouchSelf, socketTouchOthers, $"{prefix}/RawContact");
+                                } else {
+                                    rawContact = socketTouchOthers;
+                                }
+                                var smoothed = smoothingService.Smooth(dbt, $"{prefix}/Smoothed", rawContact,
+                                    touchAction.smoothingSeconds, useAcceleration: false);
+
+                                if (touchAction.enablePowerLevels && !string.IsNullOrWhiteSpace(touchAction.powerMenuPath)) {
+                                    var menuPath = touchAction.powerMenuPath;
+                                    if (!socketPowerParamCache.TryGetValue(menuPath, out var powerParam)) {
+                                        powerParam = fx.NewFloat($"{oscId}/SockPower", synced: true, def: 1f);
+                                        menu.NewMenuSlider(menuPath, powerParam);
+                                        socketPowerParamCache[menuPath] = powerParam;
+                                    }
+                                    effectiveWeight = math.Multiply($"{prefix}/Weighted", smoothed, powerParam);
+                                } else {
+                                    effectiveWeight = smoothed;
+                                }
+                            }
+
+                            // Track the last effectiveWeight for VibIntensity output after the loop
+                            lastEffectiveWeight = effectiveWeight;
+
+                            var layer = fx.NewLayer($"{oscId} - Socket Touch {socketTouchNum}");
+                            var off = layer.NewState("Off");
+                            var on = layer.NewState("On");
+
+                            var actionAdv = actionClipService.LoadStateAdv(prefix, touchAction.actionSet, socket.owner(), ActionClipService.MotionTimeMode.Auto);
+                            if (actionAdv.useMotionTime) {
+                                on.WithAnimation(actionAdv.onClip).MotionTime(effectiveWeight);
+                            } else {
+                                var tree = VFBlendTree1D.Create($"{prefix} tree", effectiveWeight);
+                                tree.Add(0, clipFactory.GetEmptyClip());
+                                tree.Add(1, actionAdv.onClip);
+                                on.WithAnimation(tree);
+                            }
+
+                            var onWhen = effectiveWeight.IsGreaterThan(0.01f);
+                            off.TransitionsTo(on).When(onWhen);
+                            on.TransitionsTo(off).When(onWhen.Not());
+                        }
+
+                        // Drive vibIntensityParam for OSC output.
+                        // IMPORTANT: AAP-driven synced floats are NOT sent via VRChat OSC — the OSC system only
+                        // reads values set through VRCAvatarParameterDriver. Therefore:
+                        //   • useWorldPowerLevels → state machine with Drives() (ParameterDriver), OSC-compatible
+                        //   • continuous touch     → blend tree fallback (AAP), may not reach OSC in VRChat
+                        if (lastEffectiveWeight != null) {
+                            if (lastWRecvs != null) {
+                                // useWorldPowerLevels: drive VibratePower via state-machine ParameterDriver
+                                // values: 0 / 0.25 / 0.50 / 0.75 / 1.00  (one level active at a time)
+                                var wPowLayer = fx.NewLayer($"{oscId} - VibIntensity");
+                                var offState = wPowLayer.NewState("Off");
+                                offState.Drives(vibIntensityParam, 0f);
+
+                                var levelValues = new[] { 0.25f, 0.50f, 0.75f, 1.00f };
+                                var levelStates = new VFState[4];
+                                for (var li = 0; li < 4; li++) {
+                                    levelStates[li] = wPowLayer.NewState($"L{li + 1}");
+                                    levelStates[li].Drives(vibIntensityParam, levelValues[li]);
+                                    // Return to Off when this level's receiver drops out
+                                    levelStates[li].TransitionsTo(offState).When(lastWRecvs[li].IsLessThan(0.5f));
+                                }
+                                // From Off, activate highest available level (higher index = higher priority)
+                                for (var li = 3; li >= 0; li--) {
+                                    offState.TransitionsTo(levelStates[li]).When(lastWRecvs[li].IsGreaterThan(0.5f));
+                                }
+                            } else {
+                                // Continuous touch: blend tree (AAP) — best effort, OSC output unreliable in VRChat.
+                                // CopyInPlace (AAP accumulation) does NOT work for synced floats either.
+                                var vibOff = clipFactory.NewClip($"{oscId} VibOff");
+                                vibOff.SetAap(vibIntensityParam, 0f);
+                                var vibOn = clipFactory.NewClip($"{oscId} VibOn");
+                                vibOn.SetAap(vibIntensityParam, 1f);
+                                var vibBlend = VFBlendTree1D.Create($"{oscId} VibBlend", lastEffectiveWeight);
+                                vibBlend.Add(0, vibOff);
+                                vibBlend.Add(1, vibOn);
+                                var vibLayer = fx.NewLayer($"{oscId} - VibIntensity");
+                                vibLayer.NewState("Drive").WithAnimation(vibBlend);
+                                Debug.Log($"[VRCFury Socket {oscId}] VibratePower layer created (blend-tree mode)." +
+                                    $"\n  OSC path: /avatar/parameters/{oscId}/VibratePower" +
+                                    $"\n  BlendParam: '{lastEffectiveWeight.Name()}'" +
+                                    $"\n  Values: 0=none … 1.0=full (proportional touch)" +
+                                    $"\n  toggleControlled={toggleParam != null}");
+                            }
+                        }
+                    }
                     
                     var injectDepthToFullControllerParams = globals.allBuildersInRun
                         .OfType<FullControllerBuilder>()
@@ -445,6 +633,16 @@ namespace VF.Service {
                 start.TransitionsTo(states[Tuple.Create(0, -1)])
                     .When(firstSocket.Item2.IsFalse().And(firstSocket.Item3.IsGreaterThan(0)));
                 start.TransitionsTo(states[Tuple.Create(0, 1)]).When(fx.Always());
+            }
+
+            // Diagnostic: dump all FX layers after Apply() completes
+            {
+                var fxRawEnd = fx.GetRaw();
+                var allLayers = fx.GetLayers();
+                var layerList = string.Join("\n  ", allLayers.Select((l, i) => $"[{i}] {l.name}"));
+                Debug.Log($"[VRCFury] BakeHapticSockets Apply() DONE." +
+                    $"\n  FX instanceID={fxRawEnd?.GetInstanceID()}, layerCount={allLayers.Count}" +
+                    $"\n  {layerList}");
             }
         }
     }

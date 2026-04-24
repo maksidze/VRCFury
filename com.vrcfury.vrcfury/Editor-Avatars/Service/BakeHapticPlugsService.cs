@@ -14,6 +14,7 @@ using VF.Model.Feature;
 using VF.Utils;
 using VF.Utils.Controller;
 using VRC.Dynamics;
+using static VF.Utils.BlendtreeMath;
 
 namespace VF.Service {
     [VFService]
@@ -34,6 +35,7 @@ namespace VF.Service {
         [VFAutowired] private readonly ScaleFactorService scaleFactorService;
         [VFAutowired] private readonly ControllersService controllers;
         [VFAutowired] private readonly FrameTimeService frameTimeService;
+        [VFAutowired] private readonly SmoothingService smoothingService;
         private ControllerManager fx => controllers.GetFx();
         [VFAutowired] private readonly MenuService menuService;
         private MenuManager menu => menuService.GetMenu();
@@ -316,6 +318,157 @@ namespace VF.Service {
                     name,
                     contacts
                 );
+            }
+
+            // Touch Actions (VibratePower support)
+            if (plug.touchActions.Count > 0) {
+                var touchActParent = GameObjects.Create("TouchActions", worldSpace);
+                const float touchRadius = 0.1f;
+                var baseReqTouch = new HapticContactsService.ReceiverRequest() {
+                    obj = touchActParent,
+                    radius = touchRadius,
+                    type = ContactReceiver.ReceiverType.Constant,
+                    localOnly = true,
+                    useHipAvoidance = plug.useHipAvoidance,
+                    usePrefix = false
+                };
+
+                var selfReqT = baseReqTouch.Clone();
+                selfReqT.paramName = $"{name}/PlugTouchSelf";
+                selfReqT.objName = "PlugTouchSelf";
+                selfReqT.tags = HapticUtils.SelfContacts;
+                selfReqT.party = HapticUtils.ReceiverParty.Self;
+                var plugTouchSelf = hapticContacts.AddReceiver(selfReqT);
+
+                var othersReqT = baseReqTouch.Clone();
+                othersReqT.paramName = $"{name}/PlugTouchOthers";
+                othersReqT.objName = "PlugTouchOthers";
+                othersReqT.tags = HapticUtils.BodyContacts;
+                othersReqT.party = HapticUtils.ReceiverParty.Others;
+                var plugTouchOthers = hapticContacts.AddReceiver(othersReqT);
+
+                var plugPowerParamCache = new Dictionary<string, VFAFloat>();
+                // Single synced OSC parameter (0…1): 0=no contact, 0.25=L1 … 1.0=L4 (or proportional touch).
+                // usePrefix:false → clean OSC path /avatar/parameters/{name}/VibratePower
+                var vibIntensityParam = fx.NewFloat("OGB/Pen/" + name.Replace('/', '_') + "/VibratePower", synced: true, def: 0f, usePrefix: false);
+                VFAFloat lastEffectiveWeight = null;
+                VFAFloat[] lastWRecvs = null;
+
+                var plugTouchNum = 0;
+                foreach (var touchAction in plug.touchActions) {
+                    plugTouchNum++;
+                    var prefix = $"{name}/PlugTouch/{plugTouchNum}";
+
+                    var dbt = directTreeService.Create($"{name} - Plug Touch {plugTouchNum} - Smooth");
+                    var math = directTreeService.GetMath(dbt);
+
+                    VFAFloat effectiveWeight;
+
+                    if (touchAction.useWorldPowerLevels) {
+                        // 4 Constant receivers, ONE active at a time (exclusive senders).
+                        // Tags: VRCF_VibPow_L1..L4.  Level N activates only LN.
+                        var wParent = GameObjects.Create($"PlugWorldPow_{plugTouchNum}", worldSpace);
+                        var wBaseReq = new HapticContactsService.ReceiverRequest() {
+                            obj             = wParent,
+                            radius          = 0.1f,
+                            type            = ContactReceiver.ReceiverType.Constant,
+                            localOnly       = true,
+                            useHipAvoidance = false,
+                            usePrefix       = false,
+                            party           = HapticUtils.ReceiverParty.Others
+                        };
+                        var wRecvs = new VFAFloat[4];
+                        for (var li = 0; li < 4; li++) {
+                            var r = wBaseReq.Clone();
+                            r.paramName = $"{prefix}/WP{li + 1}";
+                            r.objName   = $"WP{li + 1}";
+                            r.tags      = new[] { $"VRCF_VibPow_L{li + 1}" };
+                            wRecvs[li]  = hapticContacts.AddReceiver(r);
+                        }
+                        var wPower = math.Add($"{prefix}/WorldPower",
+                            ((VFAFloatOrConst)wRecvs[0], 0.25f),
+                            ((VFAFloatOrConst)wRecvs[1], 0.50f),
+                            ((VFAFloatOrConst)wRecvs[2], 0.75f),
+                            ((VFAFloatOrConst)wRecvs[3], 1.00f));
+                        effectiveWeight = smoothingService.Smooth(dbt, $"{prefix}/WSmoothed", wPower,
+                            touchAction.smoothingSeconds, useAcceleration: false);
+                        lastWRecvs = wRecvs;
+                    } else {
+                        lastWRecvs = null;
+                        VFAFloat rawContact;
+                        if (touchAction.enableSelf) {
+                            rawContact = math.Max(plugTouchSelf, plugTouchOthers, $"{prefix}/RawContact");
+                        } else {
+                            rawContact = plugTouchOthers;
+                        }
+                        var smoothed = smoothingService.Smooth(dbt, $"{prefix}/Smoothed", rawContact,
+                            touchAction.smoothingSeconds, useAcceleration: false);
+
+                        if (touchAction.enablePowerLevels && !string.IsNullOrWhiteSpace(touchAction.powerMenuPath)) {
+                            var menuPath = touchAction.powerMenuPath;
+                            if (!plugPowerParamCache.TryGetValue(menuPath, out var powerParam)) {
+                                powerParam = fx.NewFloat($"{name}/PlugPower", synced: true, def: 1f);
+                                menu.NewMenuSlider(menuPath, powerParam);
+                                plugPowerParamCache[menuPath] = powerParam;
+                            }
+                            effectiveWeight = math.Multiply($"{prefix}/Weighted", smoothed, powerParam);
+                        } else {
+                            effectiveWeight = smoothed;
+                        }
+                    }
+
+                    lastEffectiveWeight = effectiveWeight;
+
+                    var layer = fx.NewLayer($"{name} - Plug Touch {plugTouchNum}");
+                    var off = layer.NewState("Off");
+                    var on = layer.NewState("On");
+
+                    var actionAdv = actionClipService.LoadStateAdv(prefix, touchAction.actionSet, plug.owner(), ActionClipService.MotionTimeMode.Auto);
+                    if (actionAdv.useMotionTime) {
+                        on.WithAnimation(actionAdv.onClip).MotionTime(effectiveWeight);
+                    } else {
+                        var tree = VFBlendTree1D.Create($"{prefix} tree", effectiveWeight);
+                        tree.Add(0, clipFactory.GetEmptyClip());
+                        tree.Add(1, actionAdv.onClip);
+                        on.WithAnimation(tree);
+                    }
+
+                    var onWhen = effectiveWeight.IsGreaterThan(0.01f);
+                    off.TransitionsTo(on).When(onWhen);
+                    on.TransitionsTo(off).When(onWhen.Not());
+                }
+
+                // Drive vibIntensityParam for OSC output.
+                if (lastEffectiveWeight != null) {
+                    if (lastWRecvs != null) {
+                        // useWorldPowerLevels: drive VibratePower via state-machine ParameterDriver
+                        var wPowLayer = fx.NewLayer($"{name} - VibIntensity");
+                        var offState = wPowLayer.NewState("Off");
+                        offState.Drives(vibIntensityParam, 0f);
+
+                        var levelValues = new[] { 0.25f, 0.50f, 0.75f, 1.00f };
+                        var levelStates = new VFState[4];
+                        for (var li = 0; li < 4; li++) {
+                            levelStates[li] = wPowLayer.NewState($"L{li + 1}");
+                            levelStates[li].Drives(vibIntensityParam, levelValues[li]);
+                            levelStates[li].TransitionsTo(offState).When(lastWRecvs[li].IsLessThan(0.5f));
+                        }
+                        for (var li = 3; li >= 0; li--) {
+                            offState.TransitionsTo(levelStates[li]).When(lastWRecvs[li].IsGreaterThan(0.5f));
+                        }
+                    } else {
+                        // Continuous touch: blend tree (AAP) — best effort, OSC output unreliable in VRChat.
+                        var vibOff = clipFactory.NewClip($"{name} VibOff");
+                        vibOff.SetAap(vibIntensityParam, 0f);
+                        var vibOn = clipFactory.NewClip($"{name} VibOn");
+                        vibOn.SetAap(vibIntensityParam, 1f);
+                        var vibBlend = VFBlendTree1D.Create($"{name} VibBlend", lastEffectiveWeight);
+                        vibBlend.Add(0, vibOff);
+                        vibBlend.Add(1, vibOn);
+                        var vibLayer = fx.NewLayer($"{name} - VibIntensity");
+                        vibLayer.NewState("Drive").WithAnimation(vibBlend);
+                    }
+                }
             }
 
             if (propsToScale.Count > 0) {

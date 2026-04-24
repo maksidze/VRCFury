@@ -34,6 +34,7 @@ namespace VF.Component {
         [NonSerialized] public bool fromSpsForAll = false;
         
         public List<DepthActionNew> depthActions2 = new List<DepthActionNew>();
+        public List<SocketTouchAction> touchActions = new List<SocketTouchAction>();
         public State activeActions = new State();
         public bool useHipAvoidance = true;
 
@@ -77,6 +78,18 @@ namespace VF.Component {
             public bool enableSelf;
             public float smoothingSeconds = 0;
             public bool reverseClip = false;
+        }
+
+        [Serializable]
+        public class SocketTouchAction {
+            public State actionSet = new State();
+            public bool enableSelf = true;
+            public float smoothingSeconds = 0.1f;
+            public bool enablePowerLevels = false;
+            public string powerMenuPath = "SPS/Socket Power";
+            // World-pickup power control: receives 4 contact tags (VRCF_VibPow_L1..L4)
+            // from a world Udon vibrator pickup to determine power level (0/25/50/75/100 %).
+            public bool useWorldPowerLevels = false;
         }
 
         public override bool Upgrade(int fromVersion) {

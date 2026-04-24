@@ -32,6 +32,7 @@ namespace VF.Component {
         [Obsolete] public bool enableDepthAnimations = false;
         [Obsolete] public List<LegacyPlugDepthAction> depthActions = new List<LegacyPlugDepthAction>();
         public List<VRCFuryHapticSocket.DepthActionNew> depthActions2 = new List<VRCFuryHapticSocket.DepthActionNew>();
+        public List<VRCFuryHapticSocket.SocketTouchAction> touchActions = new List<VRCFuryHapticSocket.SocketTouchAction>();
         public bool useHipAvoidance = true;
 
         [Obsolete] public bool configureSps = false;

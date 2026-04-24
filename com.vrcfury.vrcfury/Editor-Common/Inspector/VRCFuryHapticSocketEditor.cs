@@ -100,6 +100,14 @@ namespace VF.Inspector {
                 VRCFuryEditorUtils.BetterProp(serializedObject.FindProperty("activeActions"))
             ));
 
+            // Touch Animations
+            container.Add(VRCFuryEditorUtils.CheckboxList(
+                serializedObject.FindProperty("touchActions"),
+                "Enable Touch Animations",
+                "Triggers an animation when this socket is touched by a hand or world vibrator pickup",
+                "Touch Animations"
+            ));
+
             container.Add(VRCFuryHapticPlugEditor.GetOgbHapticsSection(haptics => {
                 haptics.Add(SpsEditorUtils.AutoHapticIdProp(
                     serializedObject.FindProperty("oscId"),
@@ -143,6 +151,35 @@ namespace VF.Inspector {
             return container;
         }
         
+        [CustomPropertyDrawer(typeof(VRCFuryHapticSocket.SocketTouchAction))]
+        public class SocketTouchActionDrawer : PropertyDrawer {
+            public override VisualElement CreatePropertyGUI(SerializedProperty prop) {
+                var c = new VisualElement();
+                c.Add(VRCFuryEditorUtils.BetterProp(prop.FindPropertyRelative("actionSet")));
+                var useWorld = prop.FindPropertyRelative("useWorldPowerLevels");
+                c.Add(VRCFuryEditorUtils.RefreshOnChange(() => {
+                    var container2 = new VisualElement();
+                    container2.Add(VRCFuryEditorUtils.BetterProp(useWorld, "Use World Pickup Power Levels",
+                        tooltip: "When enabled, animation weight is driven by VRCF_VibPow_L1..L4 contact tags from a world Udon vibrator pickup. The 4 levels map to 25/50/75/100% weight."));
+                    if (!useWorld.boolValue) {
+                        container2.Add(VRCFuryEditorUtils.BetterProp(prop.FindPropertyRelative("enableSelf"), "Allow avatar to trigger its own animation?"));
+                        container2.Add(VRCFuryEditorUtils.BetterProp(prop.FindPropertyRelative("enablePowerLevels"), "Add power level slider to menu?"));
+                        var enablePow = prop.FindPropertyRelative("enablePowerLevels");
+                        container2.Add(VRCFuryEditorUtils.RefreshOnChange(() => {
+                            var c2 = new VisualElement();
+                            if (enablePow.boolValue)
+                                c2.Add(VRCFuryEditorUtils.BetterProp(prop.FindPropertyRelative("powerMenuPath"), "Power menu path"));
+                            return c2;
+                        }, enablePow));
+                    }
+                    container2.Add(VRCFuryEditorUtils.BetterProp(prop.FindPropertyRelative("smoothingSeconds"), "Smoothing Seconds",
+                        tooltip: "It will take approximately this many seconds to smoothly blend to the target value."));
+                    return container2;
+                }, useWorld));
+                return c;
+            }
+        }
+
         [CustomPropertyDrawer(typeof(VRCFuryHapticSocket.DepthActionNew))]
         public class DepthActionDrawer : PropertyDrawer {
             public override VisualElement CreatePropertyGUI(SerializedProperty prop) {
