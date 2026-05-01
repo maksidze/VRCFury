@@ -7,19 +7,20 @@ using VRC.SDKBase;
 ///
 /// HOW IT WORKS
 /// ────────────
-/// 4 Contact Senders with tags VRCF_VibPow_L1..L4.
-/// Only ONE sender is active at a time (exclusive).
-/// Avatar has 4 matching Constant Receivers:
-///   L1 active → avatar param = 0.25  (25 %)
-///   L2 active → avatar param = 0.50  (50 %)
-///   L3 active → avatar param = 0.75  (75 %)
-///   L4 active → avatar param = 1.00 (100 %)
-///   none      → avatar param = 0.00  (off)
+/// 5 Contact Senders with tags VRCF_VibPow_B0..B4.
+/// Each sender is one bit in a 5-bit power number.
+/// Avatar has 5 matching Constant Receivers:
+///   B0 active -> +1
+///   B1 active -> +2
+///   B2 active -> +4
+///   B3 active -> +8
+///   B4 active -> +16
+///   decoded 0..20 -> avatar param 0.00..1.00 in 5 % steps.
+///   decoded 21..31 are reserved and are not sent by this script.
 ///
 /// Enable "Touch Animations → Use World Pickup Power Levels" on the avatar's
 /// SPS Plug or SPS Socket.  VRCFury bakes the math:
-///   wPower = L1×0.25 + L2×0.50 + L3×0.75 + L4×1.00
-///   (since only one is active this always equals the correct fraction)
+///   wPower = (B0×1 + B1×2 + B2×4 + B3×8 + B4×16) / 20
 ///   → smoothed → drives VibIntensity OSC param (0…1) for OGB.
 ///
 /// Optional TPS senders (tpsPenetrating etc.) drive SPS Socket depth reaction.
@@ -27,10 +28,11 @@ using VRC.SDKBase;
 /// WORLD OBJECT HIERARCHY
 /// ─────────────────────
 /// VibratorObject
-/// ├── SenderL1   VRC Contact Sender  tag: VRCF_VibPow_L1  (exclusive, starts disabled)
-/// ├── SenderL2   VRC Contact Sender  tag: VRCF_VibPow_L2  (exclusive, starts disabled)
-/// ├── SenderL3   VRC Contact Sender  tag: VRCF_VibPow_L3  (exclusive, starts disabled)
-/// ├── SenderL4   VRC Contact Sender  tag: VRCF_VibPow_L4  (exclusive, starts disabled)
+/// ├── SenderB0   VRC Contact Sender  tag: VRCF_VibPow_B0  (bit 1, starts disabled)
+/// ├── SenderB1   VRC Contact Sender  tag: VRCF_VibPow_B1  (bit 2, starts disabled)
+/// ├── SenderB2   VRC Contact Sender  tag: VRCF_VibPow_B2  (bit 4, starts disabled)
+/// ├── SenderB3   VRC Contact Sender  tag: VRCF_VibPow_B3  (bit 8, starts disabled)
+/// ├── SenderB4   VRC Contact Sender  tag: VRCF_VibPow_B4  (bit 16, starts disabled)
 /// ├── HandSender VRC Contact Sender  tag: Hand             (starts disabled)
 /// └── TpsSenders/ (optional)
 ///     ├── Penetrating  tag: TPS_Pen_Penetrating
@@ -42,15 +44,19 @@ using VRC.SDKBase;
 public class VibratorPickup : UdonSharpBehaviour
 {
     // ── Power-level senders ───────────────────────────────────────────────────
-    [Header("Power-Level Senders (exclusive — only one active at a time)")]
-    [Tooltip("VRC Contact Sender — Tag: VRCF_VibPow_L1  →  25 %")]
-    public GameObject senderL1;
-    [Tooltip("VRC Contact Sender — Tag: VRCF_VibPow_L2  →  50 %")]
-    public GameObject senderL2;
-    [Tooltip("VRC Contact Sender — Tag: VRCF_VibPow_L3  →  75 %")]
-    public GameObject senderL3;
-    [Tooltip("VRC Contact Sender — Tag: VRCF_VibPow_L4  → 100 %")]
-    public GameObject senderL4;
+    private const int MaxPowerLevel = 20;
+
+    [Header("Power-Level Bit Senders (5-bit value, levels 0-20 used)")]
+    [Tooltip("VRC Contact Sender — Tag: VRCF_VibPow_B0  ->  bit value 1")]
+    public GameObject senderB0;
+    [Tooltip("VRC Contact Sender — Tag: VRCF_VibPow_B1  ->  bit value 2")]
+    public GameObject senderB1;
+    [Tooltip("VRC Contact Sender — Tag: VRCF_VibPow_B2  ->  bit value 4")]
+    public GameObject senderB2;
+    [Tooltip("VRC Contact Sender — Tag: VRCF_VibPow_B3  ->  bit value 8")]
+    public GameObject senderB3;
+    [Tooltip("VRC Contact Sender — Tag: VRCF_VibPow_B4  ->  bit value 16")]
+    public GameObject senderB4;
 
     [Header("Standard body sender (tag: Hand, activates when power > 0)")]
     public GameObject handSender;
@@ -66,34 +72,71 @@ public class VibratorPickup : UdonSharpBehaviour
     [Header("Optional UI / Feedback")]
     public TMPro.TextMeshPro statusLabel;
     public AudioSource clickAudio;
-    [Tooltip("5 clips for levels 0-4.  Index 0 = Off.")]
-    public AudioClip[] levelClips = new AudioClip[5];
+    [Tooltip("21 clips for levels 0-20. Index 0 = Off.")]
+    public AudioClip[] levelClips = new AudioClip[21];
 
     [Header("Debug")]
     public bool showDebugInfo = true;
 
+    [Header("Control")]
+    [Tooltip("If false, this object can only be controlled by another script, such as RemotePickup.")]
+    public bool allowDirectControl = false;
+
     // ── Synced state ──────────────────────────────────────────────────────────
     [UdonSynced(UdonSyncMode.None)]
-    private int _powerLevel = 0;   // 0=Off  1=25%  2=50%  3=75%  4=100%
-
-    private int[] _powerPercents;
+    private int _powerLevel = 0;   // 0=Off, 1..20 = 5%..100%
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     private void Start()
     {
-        _powerPercents = new int[] { 0, 25, 50, 75, 100 };
         ApplyPowerLevel();
     }
 
     // ── VRC events ────────────────────────────────────────────────────────────
 
-    /// <summary>Press Use to cycle: OFF → 25 % → 50 % → 75 % → 100 % → OFF</summary>
+    /// <summary>Press Use to cycle: OFF -> 5 % -> 10 % -> ... -> 100 % -> OFF</summary>
     public override void OnPickupUseDown()
     {
-        _powerLevel = (_powerLevel + 1) % 5;
+        if (allowDirectControl)
+        {
+            CyclePowerLevel();
+        }
+    }
+
+    public override void Interact()
+    {
+        if (allowDirectControl)
+        {
+            CyclePowerLevel();
+        }
+    }
+
+    public void CyclePowerLevel()
+    {
+        SetPowerLevel((_powerLevel + 1) % (MaxPowerLevel + 1));
+    }
+
+    public void SetPowerLevel(int powerLevel)
+    {
+        if (Networking.LocalPlayer != null && !Networking.IsOwner(gameObject))
+        {
+            Networking.SetOwner(Networking.LocalPlayer, gameObject);
+        }
+
+        _powerLevel = Mathf.Clamp(powerLevel, 0, MaxPowerLevel);
         ApplyPowerLevel();
         RequestSerialization();
+    }
+
+    public void TurnOff()
+    {
+        SetPowerLevel(0);
+    }
+
+    public int GetPowerLevel()
+    {
+        return _powerLevel;
     }
 
     public override void OnDeserialization()
@@ -107,12 +150,12 @@ public class VibratorPickup : UdonSharpBehaviour
     {
         bool on = _powerLevel > 0;
 
-        // Exclusive: only the sender for the current level is active.
-        // Avatar math: L1×0.25 + L2×0.50 + L3×0.75 + L4×1.00 = correct fraction.
-        SetActive(senderL1, _powerLevel == 1);
-        SetActive(senderL2, _powerLevel == 2);
-        SetActive(senderL3, _powerLevel == 3);
-        SetActive(senderL4, _powerLevel == 4);
+        // Bitfield protocol: decoded value / 20 = Lovense-compatible intensity.
+        SetActive(senderB0, (_powerLevel & 1) != 0);
+        SetActive(senderB1, (_powerLevel & 2) != 0);
+        SetActive(senderB2, (_powerLevel & 4) != 0);
+        SetActive(senderB3, (_powerLevel & 8) != 0);
+        SetActive(senderB4, (_powerLevel & 16) != 0);
 
         // Hand sender — activates standard body-contact haptics when on
         SetActive(handSender, on);
@@ -131,17 +174,18 @@ public class VibratorPickup : UdonSharpBehaviour
     {
         if (statusLabel == null) return;
 
-        string powerText = _powerLevel == 0 ? "OFF" : _powerPercents[_powerLevel] + " %";
+        string powerText = _powerLevel == 0 ? "OFF" : (_powerLevel * 5) + " %";
 
         if (showDebugInfo)
         {
-            string l1  = IsOn(senderL1)       ? "L1✓" : "L1✗";
-            string l2  = IsOn(senderL2)       ? "L2✓" : "L2✗";
-            string l3  = IsOn(senderL3)       ? "L3✓" : "L3✗";
-            string l4  = IsOn(senderL4)       ? "L4✓" : "L4✗";
+            string b0  = IsOn(senderB0)       ? "B0✓" : "B0✗";
+            string b1  = IsOn(senderB1)       ? "B1✓" : "B1✗";
+            string b2  = IsOn(senderB2)       ? "B2✓" : "B2✗";
+            string b3  = IsOn(senderB3)       ? "B3✓" : "B3✗";
+            string b4  = IsOn(senderB4)       ? "B4✓" : "B4✗";
             string hnd = IsOn(handSender)     ? "Hand✓" : "Hand✗";
             string tps = IsOn(tpsPenetrating) ? "TPS✓"  : "TPS✗";
-            statusLabel.text = powerText + "\n[" + l1 + " " + l2 + " " + l3 + " " + l4 + " " + hnd + " " + tps + "]";
+            statusLabel.text = powerText + "\n[" + b0 + " " + b1 + " " + b2 + " " + b3 + " " + b4 + " " + hnd + " " + tps + "]";
         }
         else
         {
