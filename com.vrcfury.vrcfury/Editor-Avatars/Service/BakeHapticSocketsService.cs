@@ -293,14 +293,14 @@ namespace VF.Service {
 
                         var socketPowerParamCache = new Dictionary<string, VFAFloat>();
 
-                        // Single synced OSC parameter (0…1): 0=no contact, 0.25=L1, 0.50=L2, 0.75=L3, 1.0=L4 (or proportional touch).
+                        // Single synced OSC parameter (0..1): 0=no contact, world pickup levels 1..20 map to 0.05..1.0.
                         // usePrefix:false → clean OSC path /avatar/parameters/{oscId}/VibratePower
                         var vibIntensityParam = fx.NewFloat("OGB/Orf/" + oscId.Replace('/','_') + "/VibratePower", synced: true, def: 0f, usePrefix: false);
                         VFAFloat lastEffectiveWeight = null;
                         // For useWorldPowerLevels: store wRecvs from last iteration to drive VibratePower via
                         // VRCAvatarParameterDriver instead of AAP blend tree.
                         // AAP-driven synced floats are NOT sent via VRChat OSC — only ParameterDriver values are.
-                        VFAFloat[] lastWRecvs = null;
+                        VFAFloat[] lastWorldBitRecvs = null;
 
                         var socketTouchNum = 0;
                         foreach (var touchAction in socket.touchActions) {
@@ -313,10 +313,8 @@ namespace VF.Service {
                             VFAFloat effectiveWeight;
 
                             if (touchAction.useWorldPowerLevels) {
-                                // 4 Constant receivers, ONE active at a time (exclusive senders).
-                                // Tags: VRCF_VibPow_L1..L4.  Level N activates only LN.
-                                // wPower = L1*0.25 + L2*0.50 + L3*0.75 + L4*1.00  →  0 / 0.25 / 0.50 / 0.75 / 1.00
-                                // Smoothed directly so level transitions are gradual.
+                                // 5 Constant receivers, one per bit. Tags: VRCF_VibPow_B0..B4.
+                                // wPower = decoded 5-bit level / 20. Smoothed directly so level transitions are gradual.
                                 var wParent = GameObjects.Create($"SockWorldPow_{socketTouchNum}", bakeResult.worldSpace);
                                 animObjects.Add(wParent);
                                 var wBaseReq = new HapticContactsService.ReceiverRequest() {
@@ -328,25 +326,26 @@ namespace VF.Service {
                                     usePrefix       = false,
                                     party           = HapticUtils.ReceiverParty.Others
                                 };
-                                var wRecvs = new VFAFloat[4];
-                                for (var li = 0; li < 4; li++) {
+                                var wRecvs = new VFAFloat[HapticWorldPickupPower.BitCount];
+                                for (var bit = 0; bit < HapticWorldPickupPower.BitCount; bit++) {
                                     var r = wBaseReq.Clone();
-                                    r.paramName = $"{prefix}/WP{li + 1}";
-                                    r.objName   = $"WP{li + 1}";
-                                    r.tags      = new[] { $"VRCF_VibPow_L{li + 1}" };
-                                    wRecvs[li]  = hapticContacts.AddReceiver(r);
+                                    r.paramName = $"{prefix}/WPB{bit}";
+                                    r.objName   = $"WPB{bit}";
+                                    r.tags      = new[] { HapticWorldPickupPower.BitTag(bit) };
+                                    wRecvs[bit] = hapticContacts.AddReceiver(r);
                                 }
                                 var wPower = math.Add($"{prefix}/WorldPower",
-                                    ((VFAFloatOrConst)wRecvs[0], 0.25f),
-                                    ((VFAFloatOrConst)wRecvs[1], 0.50f),
-                                    ((VFAFloatOrConst)wRecvs[2], 0.75f),
-                                    ((VFAFloatOrConst)wRecvs[3], 1.00f));
+                                    ((VFAFloatOrConst)wRecvs[0], 1f * HapticWorldPickupPower.LevelScale),
+                                    ((VFAFloatOrConst)wRecvs[1], 2f * HapticWorldPickupPower.LevelScale),
+                                    ((VFAFloatOrConst)wRecvs[2], 4f * HapticWorldPickupPower.LevelScale),
+                                    ((VFAFloatOrConst)wRecvs[3], 8f * HapticWorldPickupPower.LevelScale),
+                                    ((VFAFloatOrConst)wRecvs[4], 16f * HapticWorldPickupPower.LevelScale));
                                 effectiveWeight = smoothingService.Smooth(dbt, $"{prefix}/WSmoothed", wPower,
                                     touchAction.smoothingSeconds, useAcceleration: false);
                                 // Save receiver refs so the post-loop block can drive VibratePower via ParameterDriver
-                                lastWRecvs = wRecvs;
+                                lastWorldBitRecvs = wRecvs;
                             } else {
-                                lastWRecvs = null;
+                                lastWorldBitRecvs = null;
                                 VFAFloat rawContact;
                                 if (touchAction.enableSelf) {
                                     rawContact = math.Max(socketTouchSelf, socketTouchOthers, $"{prefix}/RawContact");
@@ -397,24 +396,22 @@ namespace VF.Service {
                         //   • useWorldPowerLevels → state machine with Drives() (ParameterDriver), OSC-compatible
                         //   • continuous touch     → blend tree fallback (AAP), may not reach OSC in VRChat
                         if (lastEffectiveWeight != null) {
-                            if (lastWRecvs != null) {
+                            if (lastWorldBitRecvs != null) {
                                 // useWorldPowerLevels: drive VibratePower via state-machine ParameterDriver
-                                // values: 0 / 0.25 / 0.50 / 0.75 / 1.00  (one level active at a time)
+                                // values: 0..1 in 5% steps, driven by exact 5-bit levels 1..20.
                                 var wPowLayer = fx.NewLayer($"{oscId} - VibIntensity");
                                 var offState = wPowLayer.NewState("Off");
                                 offState.Drives(vibIntensityParam, 0f);
 
-                                var levelValues = new[] { 0.25f, 0.50f, 0.75f, 1.00f };
-                                var levelStates = new VFState[4];
-                                for (var li = 0; li < 4; li++) {
-                                    levelStates[li] = wPowLayer.NewState($"L{li + 1}");
-                                    levelStates[li].Drives(vibIntensityParam, levelValues[li]);
-                                    // Return to Off when this level's receiver drops out
-                                    levelStates[li].TransitionsTo(offState).When(lastWRecvs[li].IsLessThan(0.5f));
+                                var levelStates = new VFState[HapticWorldPickupPower.MaxLevel + 1];
+                                for (var level = 1; level <= HapticWorldPickupPower.MaxLevel; level++) {
+                                    var levelWhen = HapticWorldPickupPower.LevelCondition(lastWorldBitRecvs, level);
+                                    levelStates[level] = wPowLayer.NewState($"L{level}");
+                                    levelStates[level].Drives(vibIntensityParam, level * HapticWorldPickupPower.LevelScale);
+                                    levelStates[level].TransitionsTo(offState).When(levelWhen.Not());
                                 }
-                                // From Off, activate highest available level (higher index = higher priority)
-                                for (var li = 3; li >= 0; li--) {
-                                    offState.TransitionsTo(levelStates[li]).When(lastWRecvs[li].IsGreaterThan(0.5f));
+                                for (var level = HapticWorldPickupPower.MaxLevel; level >= 1; level--) {
+                                    offState.TransitionsTo(levelStates[level]).When(HapticWorldPickupPower.LevelCondition(lastWorldBitRecvs, level));
                                 }
                             } else {
                                 // Continuous touch: blend tree (AAP) — best effort, OSC output unreliable in VRChat.

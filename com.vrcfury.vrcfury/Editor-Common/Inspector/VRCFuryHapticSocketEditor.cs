@@ -160,7 +160,7 @@ namespace VF.Inspector {
                 c.Add(VRCFuryEditorUtils.RefreshOnChange(() => {
                     var container2 = new VisualElement();
                     container2.Add(VRCFuryEditorUtils.BetterProp(useWorld, "Use World Pickup Power Levels",
-                        tooltip: "When enabled, animation weight is driven by VRCF_VibPow_L1..L4 contact tags from a world Udon vibrator pickup. The 4 levels map to 25/50/75/100% weight."));
+                        tooltip: "When enabled, animation weight is driven by VRCF_VibPow_B0..B4 contact tags from a world Udon vibrator pickup. The 5-bit value uses levels 1-20, mapping to 5-100% weight."));
                     if (!useWorld.boolValue) {
                         container2.Add(VRCFuryEditorUtils.BetterProp(prop.FindPropertyRelative("enableSelf"), "Allow avatar to trigger its own animation?"));
                         container2.Add(VRCFuryEditorUtils.BetterProp(prop.FindPropertyRelative("enablePowerLevels"), "Add power level slider to menu?"));

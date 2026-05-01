@@ -87,8 +87,8 @@ namespace VF.Component {
             public float smoothingSeconds = 0.1f;
             public bool enablePowerLevels = false;
             public string powerMenuPath = "SPS/Socket Power";
-            // World-pickup power control: receives 4 contact tags (VRCF_VibPow_L1..L4)
-            // from a world Udon vibrator pickup to determine power level (0/25/50/75/100 %).
+            // World-pickup power control: receives 5 bit tags (VRCF_VibPow_B0..B4)
+            // from a world Udon vibrator pickup to determine power level (0..20 = 0..100 %).
             public bool useWorldPowerLevels = false;
         }
 
