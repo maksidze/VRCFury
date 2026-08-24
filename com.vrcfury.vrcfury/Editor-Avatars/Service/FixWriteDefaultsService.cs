@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Collections.Immutable;
 using System.Linq;
 using JetBrains.Annotations;
 using UnityEditor;
@@ -20,6 +19,7 @@ namespace VF.Service {
     internal class FixWriteDefaultsService {
 
         [VFAutowired] private readonly VFGameObject avatarObject;
+        [VFAutowired] private readonly VRCAvatarDescriptor avatar;
         [VFAutowired] private readonly GlobalsService globals;
         [VFAutowired] private readonly OriginalAvatarService originalAvatar;
         [VFAutowired] private readonly AvatarBindingStateService bindingStateService;
@@ -28,11 +28,10 @@ namespace VF.Service {
         [VFAutowired] private readonly ControllersService controllers;
         private ControllerManager fx => controllers.GetFx();
 
-        public void RecordDefaultNow(EditorCurveBinding binding, bool isFloat, bool force = false) {
-            if (binding.type == typeof(Animator)) return;
+        public void RecordDefaultNow(VFBinding binding, bool isFloat, bool force = false) {
+            if (binding.IsAnimatorBinding()) return;
             if (GetDefaultClip().GetCurve(binding, isFloat) != null) return;
-            if (!bindingStateService.Get(binding, isFloat, out var value)) return;
-            
+
             var shouldRecord = force;
             if (!shouldRecord) {
                 // We must avoid recording our own defaults when WD is on, because a unity bug with WD on can cause our
@@ -40,21 +39,25 @@ namespace VF.Service {
                 var settings = GetBuildSettings();
                 shouldRecord = !settings.useWriteDefaults;
             }
+
+            FloatOrObject value = null;
             if (!shouldRecord) {
                 // If our calculated default value doesn't match unity's default value, we record the default even if we're using WD on
                 // because if we don't, unity will use its own default value which will be wrong.
+                if (!bindingStateService.Get(binding, isFloat, out value)) return;
                 var found = bindingStateService.Get(binding, isFloat, out var valueDeterminedByUnity, true);
                 shouldRecord = !found || value != valueDeterminedByUnity;
             }
 
             if (shouldRecord) {
+                if (value == null && !bindingStateService.Get(binding, isFloat, out value)) return;
                 GetDefaultClip().SetCurve(binding, value);
             }
         }
 
         private VFLayer _defaultLayer = null;
-        private AnimationClip _defaultClip = null;
-        public AnimationClip GetDefaultClip() {
+        private VFClip _defaultClip = null;
+        public VFClip GetDefaultClip() {
             if (_defaultClip == null) {
                 _defaultClip = clipFactory.NewClip("Defaults");
                 _defaultLayer = fx.NewLayer("Defaults", 0);
@@ -79,7 +82,7 @@ namespace VF.Service {
 
         [FeatureBuilderAction(FeatureOrder.RecordAllDefaults)]
         public void RecordAllDefaults() {
-            var propsInNonFx = new HashSet<EditorCurveBinding>();
+            var propsInNonFx = new HashSet<VFBinding>();
             foreach (var c in controllers.GetAllUsedControllers()) {
                 if (c.GetType() == VRCAvatarDescriptor.AnimLayerType.FX) continue;
                 foreach (var layer in c.GetLayers()) {
@@ -95,20 +98,18 @@ namespace VF.Service {
                 }
             }
 
-            foreach (var layer in GetMaintainedLayers(fx)) {
-                foreach (var state in new AnimatorIterator.States().From(layer)) {
-                    if (!state.writeDefaultValues) continue;
-                    foreach (var clip in new AnimatorIterator.Clips().From(state)) {
-                        foreach (var binding in clip.GetFloatBindings()) {
-                            if (propsInNonFx.Contains(binding.Normalize())) continue;
-                            RecordDefaultNow(binding, true);
-                        }
-                        foreach (var binding in clip.GetObjectBindings()) {
-                            if (propsInNonFx.Contains(binding.Normalize())) continue;
-                            RecordDefaultNow(binding, false);
-                        }
-                    }
-                }
+            var bindings = GetMaintainedLayers(fx)
+                .SelectMany(layer => new AnimatorIterator.States().From(layer))
+                .Where(state => state.writeDefaultValues)
+                .SelectMany(state => new AnimatorIterator.Clips().From(state))
+                .SelectMany(clip => clip.GetFloatBindings().Select(binding => (binding, isFloat: true))
+                    .Concat(clip.GetObjectBindings().Select(binding => (binding, isFloat: false))))
+                .Distinct()
+                .Where(pair => !propsInNonFx.Contains(pair.binding.Normalize()))
+                .ToArray();
+
+            foreach (var (binding, isFloat) in bindings) {
+                RecordDefaultNow(binding, isFloat);
             }
         }
 
@@ -146,20 +147,10 @@ namespace VF.Service {
             public bool ignoredBroken;
         }
         private BuildSettings _buildSettings;
-        private BuildSettings GetBuildSettings() {
-            if (_buildSettings != null) {
-                return _buildSettings;
-            }
-            
-            var allManagedLayers = controllers.GetAllUsedControllers()
-                .SelectMany(controller => controller.GetManagedLayers())
-                .ToImmutableHashSet();
 
-            var analysis = DetectExistingWriteDefaults(
-                controllers.GetAllUsedControllers(),
-                allManagedLayers
-            );
-
+        [FeatureBuilderAction(FeatureOrder.DetermineWriteDefaultsStrategy)]
+        public void DetermineWriteDefaultsStrategy() {
+            var analysis = DetectExistingWriteDefaults(avatar);
             var fixSetting = globals.allFeaturesInRun.OfType<FixWriteDefaults>().FirstOrDefault();
             var mode = FixWriteDefaults.FixWriteDefaultsMode.Disabled;
 
@@ -221,6 +212,12 @@ namespace VF.Service {
                 useWriteDefaults = useWriteDefaults,
                 ignoredBroken = analysis.isBroken && mode == FixWriteDefaults.FixWriteDefaultsMode.Disabled
             };
+        }
+
+        private BuildSettings GetBuildSettings() {
+            if (_buildSettings == null) {
+                throw new InvalidOperationException("Write Defaults strategy was requested before it was determined");
+            }
             return _buildSettings;
         }
 
@@ -246,36 +243,27 @@ namespace VF.Service {
             public string debugInfo;
             public IList<string> weirdStates;
         }
-        
-        // Returns: Broken, Should Use Write Defaults, Reason, Bad States
-        public static DetectionResults DetectExistingWriteDefaults<T>(
-            ICollection<T> avatarControllers,
-            ISet<VFLayer> layersToIgnore = null
-        ) where T : VFControllerWithVrcType {
-            var controllerInfos = avatarControllers.Select(controller => {
-                var type = controller.vrcType;
-                var info = new ControllerInfo();
-                info.type = type;
-                foreach (var layer in controller.GetLayers()) {
-                    var ignore = layersToIgnore != null && layersToIgnore.Contains(layer);
-                    if (!ignore) {
-                        foreach (var state in new AnimatorIterator.States().From(layer)) {
-                            List<string> list;
-                            if (layer.blendingMode == AnimatorLayerBlendingMode.Additive || type == VRCAvatarDescriptor.AnimLayerType.Additive) {
-                                list = state.writeDefaultValues ? info.additiveOnStates : info.additiveOffStates;
-                            } else if (new AnimatorIterator.Trees().From(state).Any(tree => tree.blendType == BlendTreeType.Direct)) {
-                                list = state.writeDefaultValues ? info.directOnStates : info.directOffStates;
-                            } else {
-                                list = state.writeDefaultValues ? info.onStates : info.offStates;
-                            }
-                            list.Add(layer.name + " | " + state.name);
-                        }
-                    }
-                }
 
-                return info;
-            }).ToList();
-            
+        public static DetectionResults DetectExistingWriteDefaults(VRCAvatarDescriptor avatar) {
+            var controllerInfos = VRCAvatarUtils.GetAllControllers(avatar)
+                .Select(found => {
+                    if (found.controller == null) return null;
+                    var info = new ControllerInfo { type = found.type };
+                    var isAdditiveController = found.type == VRCAvatarDescriptor.AnimLayerType.Additive;
+                    foreach (var state in VrcfAnimationDebugInfo.GetWriteDefaultsStates(found.controller)) {
+                        List<string> list;
+                        if (state.isAdditive || isAdditiveController) {
+                            list = state.writeDefaults ? info.additiveOnStates : info.additiveOffStates;
+                        } else if (state.isDirect) {
+                            list = state.writeDefaults ? info.directOnStates : info.directOffStates;
+                        } else {
+                            list = state.writeDefaults ? info.onStates : info.offStates;
+                        }
+                        list.Add(state.name);
+                    }
+                    return info;
+                }).NotNull().ToList();
+
             var debugList = new List<string>();
             foreach (var info in controllerInfos) {
                 var entries = new List<string>();
@@ -308,12 +296,13 @@ namespace VF.Service {
             }
 
             var shouldBeOnIfWeAreInControl = shouldBeOnIfWeAreNotInControl;
-            
-            var weirdStates = (shouldBeOnIfWeAreNotInControl ? offStates : onStates).Concat(directOffStates).Concat(additiveOffStates).ToList();
-            var broken = weirdStates.Count > 0;
+            var weirdStates = (shouldBeOnIfWeAreNotInControl ? offStates : onStates)
+                .Concat(directOffStates)
+                .Concat(additiveOffStates)
+                .ToList();
 
             return new DetectionResults {
-                isBroken = broken,
+                isBroken = weirdStates.Count > 0,
                 shouldBeOnIfWeAreInControl = shouldBeOnIfWeAreInControl,
                 shouldBeOnIfWeAreNotInControl = shouldBeOnIfWeAreNotInControl,
                 debugInfo = debugInfo,
